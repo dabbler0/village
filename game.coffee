@@ -368,6 +368,50 @@ FARM = new BuildingTypeTemplate(
   )
 )
 
+TREASURY = new BuildingTypeTemplate(
+  'Treasury',
+  5,
+  new Action(
+    'If you have less than 5 Gold, take one Gold. *Increases your Gold storage by 2.*'
+    (context, cb) ->
+      if context.board.goldReserves < 5
+        context.board.goldReserves += 1
+      do cb
+  ),
+  {
+    food: 0
+    wood: 0
+    gold: 2
+  }
+)
+
+WAREHOUSE = new BuildingTypeTemplate(
+  'Warehouse',
+  5,
+  {},
+  new Action(
+    'Choose one: Pay 1 Food and gain 1 Wood, or pay 1 Wood and gain 1 Food. *Increases your Food storage by 10 and Wood storage by 3.'
+    (context, cb) ->
+      context.interact.menu {
+        'Pay 1 Food': ->
+          if context.board.foodReserves >= 1
+            context.board.foodReserves -= 1
+            context.board.woodReserves += 1
+          do cb
+        'Pay 1 Wood': ->
+          if context.board.woodReserves >= 1
+            context.board.woodReserves -= 1
+            context.board.foodReserves += 1
+          do cb
+      }
+  ),
+  {
+    food: 10
+    wood: 3
+    gold: 0
+  }
+)
+
 GRANARY = new BuildingTypeTemplate(
   'Granary',
   2,
@@ -457,6 +501,8 @@ TOWN_HALL = new BuildingTypeTemplate(
 BUILDING_DECK = generate_deck [
   [FARM, 30]
   [GRANARY, 20]
+  [WAREHOUSE, 10]
+  [TREASURY, 10]
   [LUMBER_HUT, 20]
   [MINE, 20]
   [SCHOOLHOUSE, 10]
@@ -521,10 +567,10 @@ DOCTOR = new ProfessionTemplate(
   )
 )
 
-SCHOLAR = new ProfessionTemplate(
-  'Scholar',
+HEIR = new ProfessionTemplate(
+  'Heir',
   new Action(
-    'Choose one: replace my profession with a profession in the discard pile.'
+    'Replace my profession with a profession in the discard pile.'
     (context, cb) ->
       context.interact.optionalSelect context.board.professionDeck.discard, null, cb, (replacement) ->
         # Remove the replacement from the discard pile
@@ -752,16 +798,18 @@ HISTORIAN = new ProfessionTemplate(
       context.interact.optionalSelect context.board.technologyDeck.discard, null, cb, (selected) ->
         context.board.technologyDeck.discard.remove selected
         context.board.technologyDeck.cards.push selected
+
+        do cb
   )
 )
 
 MATHEMATICIAN = new ProfessionTemplate(
   'Mathematician',
   new Action(
-    'If I am age 9 or 10, Research(10).'
+    'If I am age 9 or 10, Research(15).'
     (context, cb) ->
       if context.actingCard.age in [9, 10]
-        research 10, context, cb
+        research 15, context, cb
       else
         do cb
   )
@@ -777,6 +825,7 @@ CHEMIST = new ProfessionTemplate(
         options['Gain 1 Gold'] = ->
           context.board.woodReserves -= 1
           context.board.foodReserves -= 1
+          context.board.goldReserves += 1
           do cb
       if context.board.goldReserves >= 1
         options['Research(5)'] = ->
@@ -969,7 +1018,7 @@ VILLAGER_DECK = generate_deck [
   [FREELANCER, 7],
   [HOUSEWIFE, 5],
   [DOCTOR, 3],
-  [SCHOLAR, 3],
+  [HEIR, 3],
   [GRAVEDIGGER, 3],
   [OVERSEER, 3],
   [TRAVELER, 7],
@@ -1058,10 +1107,10 @@ IRRIGATION = new TechnologyTemplate(
   ),
   {
     'End of turn': new Action(
-      'Put one Food on each of your farms.',
+      'Put one Food on each of your nonempty farms.',
       (context, cb) ->
         context.board.buildings.cards.forEach (building) ->
-          if building.type.name is 'Farm' and building.progress >= building.type.bulk
+          if building.type.name is 'Farm' and building.progress >= building.type.bulk and building.food >= 1
             building.food += 1
             building.food = Math.min building.food, 10
         do cb
@@ -1070,12 +1119,31 @@ IRRIGATION = new TechnologyTemplate(
   null
 )
 
+HUNTING_TRAPS = new TechnologyTemplate(
+  'Hunting Traps',
+  new Requirement(
+    '4 buildings (finished or unfinished). Two empty Farms',
+    ((context, cb) ->
+      context.board.buildings.cards.length >= 3 and context.board.buildings.cards.filter((x) -> x.type.name is 'Farm' and x.progress is x.type.bulk and x.food is 0).length >= 2
+    )
+  ),
+  {
+    'End of turn': new Action(
+      'Take 1 Food for each of your Farms.',
+      (context, cb) ->
+        context.board.foodReserves += context.board.buildings.cards.filter((x) -> x.type.name is 'Farm' and x.progress is x.type.bulk)
+    )
+  }
+)
+
 CROP_ROTATION = new TechnologyTemplate(
   'Crop Rotation',
   new Requirement(
-    '2 Farms, one empty and one with Food.',
+    '3 Farms, at least one empty, and at least one with Food.',
     ((context) ->
-      context.board.buildings.cards.some((x) -> x.progress is x.type.bulk and x.type.name is 'Farm' and x.food is 0) and context.board.buildings.cards.some((x) -> x.progress is x.type.bulk and x.type.name is 'Farm' and x.food >= 1)
+      context.board.buildings.cards.some((x) -> x.progress is x.type.bulk and x.type.name is 'Farm' and x.food is 0) and
+      context.board.buildings.cards.some((x) -> x.progress is x.type.bulk and x.type.name is 'Farm' and x.food >= 1) and
+      context.board.buildings.cards.filter((x) -> x.progress is x.type.bulk and x.type.name is 'Farm').length >= 3
     )
   ),
   {
@@ -1112,7 +1180,7 @@ TOOLS = new TechnologyTemplate(
   new Requirement(
     '5 Wood, 3 unfinished buildings',
     ((context) ->
-      context.board.woodReserves >= 5 and context.board.buildings.cards.filter((x) -> x.bulk < x.progress).length >= 3
+      context.board.woodReserves >= 5 and context.board.buildings.cards.filter((x) -> x.progress < x.type.bulk).length >= 3
     )
   ),
   {},
@@ -1192,6 +1260,23 @@ NURSING = new TechnologyTemplate(
   null
 )
 
+INHERITANCE = new TechnologyTemplate(
+  'Inheritance',
+  new Requirement(
+    '2 villagers who will be age 10 by the end of this turn.',
+    (context) ->
+      context.board.villagers.cards.filter((x) -> x.age is 10 and x.acted or x.age is 8 and not x.acted).length >= 2
+  ),
+  {
+    'End of turn': new Action(
+      'Take 5 Food for each villager of age 10.',
+      (context, cb) ->
+        context.board.foodReserves += 5 * context.board.villagers.filter((x) -> x.age is 10).length
+        do cb
+    )
+  }
+)
+
 PATENTS = new TechnologyTemplate(
   'Patents',
   new Requirement(
@@ -1210,14 +1295,14 @@ PATENTS = new TechnologyTemplate(
 UTOPIA = new TechnologyTemplate(
   'Utopia',
   new Requirement(
-    '10 Villagers. 15 Buildings. A total of 40 bulk among your buildings. 40 Food, 20 Wood, and 10 Gold.',
+    '10 Villagers. 10 finished Buildings. A total of 40 bulk among your finished buildings. 40 Food, 15 Wood, and 12 Gold.',
     ((context) ->
       context.board.villagers.cards.length >= 10 and
-      context.board.buildings.cards.length >= 10 and
-      context.board.buildings.cards.map((x) -> x.bulk).reduce((a, b) -> a + b) >= 40 and
+      context.board.buildings.cards.filter((x) -> x.progress is x.type.bulk).length >= 10 and
+      context.board.buildings.cards.filter((x) -> x.progress is x.type.bulk).map((x) -> x.progress).reduce((a, b) -> a + b) >= 40 and
       context.board.foodReserves >= 40 and
-      context.board.woodReserves >= 20 and
-      context.board.goldReserves >= 10
+      context.board.woodReserves >= 15 and
+      context.board.goldReserves >= 12
     )
   ),
   {
@@ -1235,16 +1320,16 @@ UTOPIA = new TechnologyTemplate(
 WORK_ANIMALS = new TechnologyTemplate(
   'Work Animals',
   new Requirement(
-    '10 Food per building you have',
+    '6 Food per Farm, Mine, or Lumber Hut you have',
     ((context) ->
-      context.board.foodReserves >= context.board.buildings.cards.filter((x) -> x.progress is x.type.bulk).length * 10
+      context.board.foodReserves >= context.board.buildings.cards.filter((x) -> x.progress is x.type.bulk and x.type.name in ['Mine', 'Farm', 'Lumber Hut']).length * 6
     )
   ),
   {
     'End of turn': new Action(
-      'For each of your buildings, you may pay 1 Food to take its action.',
+      'For each of your Farms, Mines, and Lumber Huts you have not played, you may pay 1 Food to play it.',
       ((context, cb) ->
-        buildings = board.buildings.cards.filter((x) -> x.progress >= x.type.bulk and not x.acted)
+        buildings = board.buildings.cards.filter((x) -> x.progress >= x.type.bulk and not x.acted and x.type.name in ['Mine', 'Farm', 'Lumber Hut'])
         recurrent = (i = 0) ->
           if context.board.foodReserves >= 1 and i < buildings.length
             building = buildings[i]
@@ -1297,29 +1382,51 @@ SCAFFOLDING = new TechnologyTemplate(
   new Requirement(
     '3 unfinished buildings, each at least 5 in bulk.',
     (context) ->
-      context.buildings.cards.filter((x) -> x.progress < x.type.bulk and x.type.bulk >= 5).length >= 3
+      context.board.buildings.cards.filter((x) -> x.progress < x.type.bulk and x.type.bulk >= 5).length >= 3
   ),
   {
     'Whenever you Build': new Action(
       'Put 1 Wood here',
       (context, cb) ->
-        context.textCard.wood += 1
+        unless context.textCard._disableActivation
+          context.textCard.wood += 1
         do cb
     )
   },
   new Action(
-    'Build all the wood here.',
+    'Build all the wood here. This card does not activate itself.',
     (context, cb) ->
+      context.textCard._disableActivation = true
       recurrent = ->
         if context.textCard.wood >= 1
           context.textCard.wood -= 1
           context.board.woodReserves += 1
           build context, recurrent
         else
+          context.textCard._disableActivation = false
           do cb
 
       do recurrent
   )
+)
+
+GARDENS = new TechnologyTemplate(
+  'Gardens',
+  new Requirement(
+    '2 villagers of age 5 or older, and 2 Farms with food on them.',
+    (context) ->
+      context.board.buildings.cards.filter((x) -> x.progress is x.type.bulk and x.type.name is 'Farm' and x.food >= 1).length >= 2 and
+      context.board.villagers.cards.filter((x) -> x.age >= 5).length >= 2
+  ),
+  {
+    'End of turn': new Action(
+      'Take 1 Food for each villager of age 6 or older.',
+      (context, cb) ->
+        context.board.foodReserves += context.board.villagers.cards.filter((x) -> x.age >= 6).length
+        do cb
+    )
+  },
+  null
 )
 
 TECHNOLOGY_SAMPLER = []
@@ -1333,7 +1440,9 @@ TECHNOLOGY_DECK = generate_deck [
   [GEOLOGY, 10]
   [MINING_EXPLOSIVES, 10]
   [CROP_ROTATION, 10]
+  [GARDENS, 10]
   [IRRIGATION, 10]
+  [INHERITANCE, 10]
   [NURSING, 10]
   [PATENTS, 10]
   [WORK_ANIMALS, 10]
@@ -1360,7 +1469,7 @@ singleVillager = (board, villager, cb) ->
         context = new ActionContext board, tech, villager
         tech.action.apply context, cb
 
-  if board.foodReserves >= 4
+  if board.foodReserves >= 5
     menu['Give birth'] = ->
       board.foodReserves -= 4
       board.villagers.place new Villager board.professionDeck.draw()
@@ -1381,8 +1490,8 @@ villagerRecurrent = (board, cb) ->
       singleVillager board, villager, ->
         # Cap resources
         board.foodReserves = Math.min board.foodReserves, 20 + board.buildings.cards.filter((x) -> x.progress >= x.type.bulk).map((x) -> x.type.storage.food).reduce((a, b) -> a + b)
-        board.woodReserves = Math.min board.woodReserves, 10 + board.buildings.cards.filter((x) -> x.progress >= x.type.bulk).map((x) -> x.type.storage.wood).reduce((a, b) -> a + b)
-        board.goldReserves = Math.min board.goldReserves, 5 + board.buildings.cards.filter((x) -> x.progress >= x.type.bulk).map((x) -> x.type.storage.gold).reduce((a, b) -> a + b)
+        board.woodReserves = Math.min board.woodReserves, 9 + board.buildings.cards.filter((x) -> x.progress >= x.type.bulk).map((x) -> x.type.storage.wood).reduce((a, b) -> a + b)
+        board.goldReserves = Math.min board.goldReserves, 8 + board.buildings.cards.filter((x) -> x.progress >= x.type.bulk).map((x) -> x.type.storage.gold).reduce((a, b) -> a + b)
 
         villagerRecurrent board, cb
   else
@@ -1415,6 +1524,11 @@ executeTurn = (board, cb) ->
 
           # 2 De-act all buildings
           board.buildings.cards.forEach (building) -> building.acted = false
+
+          # Cap resources
+          board.foodReserves = Math.min board.foodReserves, 20 + board.buildings.cards.filter((x) -> x.progress >= x.type.bulk).map((x) -> x.type.storage.food).reduce((a, b) -> a + b)
+          board.woodReserves = Math.min board.woodReserves, 10 + board.buildings.cards.filter((x) -> x.progress >= x.type.bulk).map((x) -> x.type.storage.wood).reduce((a, b) -> a + b)
+          board.goldReserves = Math.min board.goldReserves, 5 + board.buildings.cards.filter((x) -> x.progress >= x.type.bulk).map((x) -> x.type.storage.gold).reduce((a, b) -> a + b)
 
           do cb
 
