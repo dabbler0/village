@@ -25,3 +25,14 @@ Cards will mention the actions `Research(n)`, `Design(n)`, `Educate(n)`, and `Bu
   - `Educate(n)`: pick a villager on your Villagers tableau that hasn't acted yet. Age it by one, and it has now acted. Look at the top `n` cards in the Professions deck. You may pick one and replace the chosen villager's profession with it, discarding the rest. Otherwise, discard them all.
   - `Design(n)`: look at the top `n` cards from the Buildings deck. You may pick one and put it onto your Buildings tableau. Discard the rest. Note: this is just a building plan; it can't be used until it has been built by Build actions.
   - `Build`: If you have at least 1 Wood, put 1 Wood onto any building in your Buildings tableau. Buildings cannot be used until they have Wood on them equal to their Bulk number, which is listed on the card.
+
+Losing and Winning
+------------------
+
+There are two lose conditions:
+  1. You have no food.
+  2. You have no villagers.
+
+(clearly, in either case, you cannot continue the game).
+
+The win condition is to research the technology `Utopia`. This is a technology which requires you to have 20 villagers out at once, 20 buildings, and 30 other technologies, and costs 50 of each resource.
