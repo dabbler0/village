@@ -21,6 +21,9 @@ class Profession
 
   render: -> "(P) #{@name}: #{@action.text}"
 
+class Requirement
+  constructor: (@text, @fn) ->
+
 class Villager
   constructor: (@profession) ->
     @age = 0
@@ -30,15 +33,21 @@ class Villager
 
 # A Building
 class BuildingTypeTemplate
-  constructor: (@name, @bulk, @hooks, @action) ->
+  constructor: (@name, @bulk, @hooks, @action, @storage = {food: 0, gold: 0, wood: 0}) ->
 
-  create: -> new BuildingType @name, @bulk, @hooks, @action
+  create: -> new BuildingType @name, @bulk, @hooks, @action, @storage
 
 class BuildingType
-  constructor: (@name, @bulk, @hooks, @action) ->
+  constructor: (@name, @bulk, @hooks, @action, @storage) ->
 
   render: -> "(T) #{@name}: #{@action.text}"
 
+formatFWG = (food, wood, gold) ->
+  if food > 0 or wood > 0 or gold > 0 then " (#{[
+    (if food > 0 then "#{food}F" else ""),
+    (if wood > 0 then "#{wood}W" else ""),
+    (if gold > 0 then "#{gold}G" else "")
+  ].filter((x) -> x.length > 0).join(' ')})" else ""
 class Building
   constructor: (@type, @progress = 0) ->
     @acted = false
@@ -47,7 +56,7 @@ class Building
     @wood = 0
     @gold = 0
 
-  render: -> "(B) #{@type.name} [#{@progress}/#{@type.bulk}] (#{@food}F #{@wood}W #{@gold}G) [#{if @acted then '#' else ' '}]: #{@type.action.text}"
+  render: -> "(B) #{@type.name}#{formatFWG(@food, @wood, @gold)} [#{@progress}/#{@type.bulk}][#{if @acted then '#' else ' '}]: #{@type.action.text}"
 
 # A Technology
 class TechnologyTemplate
@@ -57,8 +66,11 @@ class TechnologyTemplate
 
 class Technology
   constructor: (@name, @requirement, @hooks, @action) ->
+    @food = 0
+    @wood = 0
+    @gold = 0
 
-  render: -> "(R) #{@name}"
+  render: -> "(R) #{@name}#{formatFWG(@food, @wood, @gold)}\n  Requires: #{@requirement.text}#{if @action? then "\n  Action: #{@action.text}" else ""}#{("\n  #{key}: #{val.text}" for key, val of @hooks).join('')}"
 
 # The Board consists of four VISIBLE card areas (Tableau) and three INVISIBLE ones (Decks).
 #
@@ -111,18 +123,17 @@ class Deck
 class Board
   constructor: ->
     @villagers = new Tableau([
-      new Villager(FARMER),
-      new Villager(FARMER)
+      new Villager(FARMER.create()),
+      new Villager(FARMER.create())
     ])
 
     for villager in @villagers.cards
       villager.acted = false
-      villager.age = 8
 
-    @technologies = new Tableau()
+    @technologies = new Tableau(TECHNOLOGY_SAMPLER)
     @buildings = new Tableau([
-      new Building(FARM, 2),
-      new Building(FARM, 2)
+      new Building(FARM.create(), 2),
+      new Building(FARM.create(), 2),
     ])
 
     @revealed = new Tableau()
@@ -154,13 +165,17 @@ class ConsoleBoard extends Board
       else
         options = []
         for card, i in viableCards
-          options.push " #{i} | #{card.render()}"
+          options.push " #{i} | #{card.render().replace(/\n/g, '\n    ')}"
 
-        @rl.question 'Select one (\'n\' for none):\n' + options.join('\n') + '\n> ', (result) ->
-          if result is 'n'
-            do decline
-          else
-            callback viableCards[Number(result)]
+        recurrent = =>
+          @rl.question 'Select one (\'n\' for none):\n' + options.join('\n') + '\n> ', (result) ->
+            if result is 'n'
+              do decline
+            else if Number(result) in [0...viableCards.length]
+              callback viableCards[Number(result)]
+            else
+              do recurrent
+        do recurrent
 
     @interact.menu = (options) =>
       results = []
@@ -171,11 +186,17 @@ class ConsoleBoard extends Board
         results.push val
         i += 1
 
-      @rl.question 'Select one:\n' + display.join('\n') + '\n> ', (answer) ->
-        do results[Number(answer)]
+      recurrent = =>
+        @rl.question 'Select one:\n' + display.join('\n') + '\n> ', (answer) ->
+          if Number(answer) in [0...results.length]
+            do results[Number(answer)]
+          else
+            do recurrent
+      do recurrent
 
   render: ->
     lines = []
+    lines.push `'\033[2J\033[1;1H'`
     lines.push "#{@foodReserves} FOOD, #{@woodReserves} WOOD, #{@goldReserves} GOLD"
     lines.push 'VILLAGERS'
     lines.push '========='
@@ -195,7 +216,7 @@ class ConsoleBoard extends Board
     lines.push '============'
 
     for tech, i in @technologies.cards
-      lines.push '  ' + tech.render()
+      lines.push '  ' + tech.render().replace(/\n/g, '\n  ')
     return lines.join '\n'
 
 generate_deck = (pairs) ->
@@ -237,7 +258,20 @@ build = (context, cb) ->
     context.interact.optionalSelect board.buildings, ((b) -> b.progress < b.type.bulk), cb, (selected) ->
       context.board.woodReserves -= 1
       selected.progress += 1
-      do cb
+
+      # Handle build hooks
+      recurrent = (rcb, i = 0) ->
+        if i is context.board.technologies.cards.length
+          do rcb
+        else
+          card = context.board.technologies.cards[i]
+          if card.hooks['Whenever you Build']?
+            console.log 'TECHNOLOGY ACTIVATES:', card.name
+            card.hooks['Whenever you Build'].apply context.subcontext(card, card), -> recurrent rcb, i + 1
+          else
+            recurrent rcb, i + 1
+
+      recurrent cb
   else
     do cb
 
@@ -245,6 +279,10 @@ educate = (n, context, cb) ->
   if context.board.foodReserves >= 1
     # Ask the player to select a villager to educate
     context.interact.optionalSelect board.villagers, ((v) -> not v.acted), cb, (villager) ->
+      context.board.foodReserves -= 1
+      villager.age += 1
+      villager.acted = true
+
       educate_raw n, context, cb, villager
   else
     do cb
@@ -257,11 +295,6 @@ educate_raw = (n, context, cb, villager) ->
   # Ask the player to select a new profession
   context.interact.optionalSelect board.revealed, null, (->
     context.board.professionDeck.discardThese context.board.revealed.wipe()
-
-    context.board.foodReserves -= 1
-    villager.age += 1
-    villager.acted = true
-
     do cb
   ), (selected) ->
     # Remove the selected card from the revealed tableau
@@ -276,11 +309,6 @@ educate_raw = (n, context, cb, villager) ->
     # Replace the profession with the selected card
     villager.profession = selected
 
-    # Age the villager
-    context.board.foodReserves -= 1
-    villager.age += 1
-    villager.acted = true
-
     do cb
 
 research = (n, context, cb) ->
@@ -288,20 +316,30 @@ research = (n, context, cb) ->
   for [1..n]
     context.board.revealed.place context.board.technologyDeck.draw()
 
-  context.interact.optionalSelect board.revealed, ((card) -> card.requirement(context)), (->
-    context.board.technologyDeck.discardThese context.board.revealed.wipe()
-    do cb
-  ), (selected) ->
-    # Remove the selected card from the revealed tableau
-    context.board.revealed.remove selected
+  console.log 'REVEALED:'
+  console.log '========='
+  context.board.revealed.cards.forEach (card) -> console.log '  ' + card.render().replace(/\n/g, '\n  ')
+  console.log ''
 
-    # Add the new research
-    context.board.technologies.place selected
+  context.interact.menu {
+    'Okay': ->
+      context.interact.optionalSelect board.revealed, ((card) ->
+        card.requirement.fn(context) and context.board.technologies.cards.every((tech) -> tech.name isnt card.name)
+      ), (->
+        context.board.technologyDeck.discardThese context.board.revealed.wipe()
+        do cb
+      ), (selected) ->
+        # Remove the selected card from the revealed tableau
+        context.board.revealed.remove selected
 
-    # Discard the other researches
-    context.board.technologyDeck.discardThese context.board.revealed.wipe()
+        # Add the new research
+        context.board.technologies.place selected
 
-    do cb
+        # Discard the other researches
+        context.board.technologyDeck.discardThese context.board.revealed.wipe()
+
+        do cb
+  }
 
 # THE BUILDINGS
 # ====================
@@ -310,18 +348,41 @@ FARM = new BuildingTypeTemplate(
   2,
   [],
   new Action(
-    'Choose one: Put 2 Food on this card, or take all the Food on this card.',
+    'Choose one: Put 2 Food on this card, or take all the Food on this card. This card can\'t store more than 10 Food.',
     (context, cb) ->
-      context.interact.menu {
-        'Place 2 Food': ->
-          context.textCard.food += 2
-          do cb
-        'Take Food': ->
-          context.board.foodReserves += context.textCard.food
-          context.textCard.food = 0
-          do cb
-      }
+      if context.textCard.food < 10
+        context.interact.menu {
+          'Place 2 Food': ->
+            context.textCard.food += 2
+            context.textCard.food = Math.min context.textCard.food, 10
+            do cb
+          'Take Food': ->
+            context.board.foodReserves += context.textCard.food
+            context.textCard.food = 0
+            do cb
+        }
+      else
+        context.board.foodReserves += context.textCard.food
+        context.textCard.food = 0
+        do cb
   )
+)
+
+GRANARY = new BuildingTypeTemplate(
+  'Granary',
+  2,
+  [],
+  new Action(
+    'Take one food. *Increases your Food storage by 5.*'
+    (context, cb) ->
+      context.board.foodReserves += 1
+      do cb
+  ),
+  {
+    food: 5
+    wood: 0
+    gold: 0
+  }
 )
 
 LUMBER_HUT = new BuildingTypeTemplate(
@@ -336,7 +397,7 @@ LUMBER_HUT = new BuildingTypeTemplate(
           context.textCard.wood += 1
           do cb
         'Take 2 Wood': ->
-          context.board.foodReserve += Math.min 2, context.textCard.wood
+          context.board.woodReserves += Math.min 2, context.textCard.wood
           context.textCard.wood = Math.max 0, context.textCard.wood - 2
           do cb
       }
@@ -348,11 +409,11 @@ MINE = new BuildingTypeTemplate(
   4,
   [],
   new Action(
-    'Choose one: If there\'s a Gold here, take it. Otherwise, put a Gold here.'
+    'Choose one: If there is Gold here, take one. Otherwise, put a Gold here.'
     (context, cb) ->
       if context.textCard.gold >= 1
-        context.board.goldReserve += 1
-        context.textCard.gold = 0
+        context.board.goldReserves += 1
+        context.textCard.gold -= 1
       else
         context.textCard.gold += 1
 
@@ -395,6 +456,7 @@ TOWN_HALL = new BuildingTypeTemplate(
 
 BUILDING_DECK = generate_deck [
   [FARM, 30]
+  [GRANARY, 20]
   [LUMBER_HUT, 20]
   [MINE, 20]
   [SCHOOLHOUSE, 10]
@@ -417,7 +479,9 @@ FREELANCER = new ProfessionTemplate(
     (context, cb) ->
       imitatee = context.board.professionDeck.draw()
       console.log 'Imitating: ', imitatee.name, imitatee.action.text
-      imitatee.action.apply context.subcontext(imitatee, context.actingCard), cb
+      context.interact.menu {
+        'Okay': -> imitatee.action.apply context.subcontext(imitatee, context.actingCard), cb
+      }
   )
 )
 
@@ -426,9 +490,9 @@ HOUSEWIFE = new ProfessionTemplate(
   new Action(
     'Pick another villager. You may pay 2 Food to remove 1 age from them.',
     (context, cb) ->
-      if context.board.foodReserve >= 2
+      if context.board.foodReserves >= 2
         context.interact.optionalSelect context.board.villagers, ((v) -> v.age > 0), cb, (villager) ->
-          context.board.foodReserve -= 2
+          context.board.foodReserves -= 2
           villager.age -= 1
           do cb
       else
@@ -446,7 +510,7 @@ DOCTOR = new ProfessionTemplate(
         context.interact.optionalSelect context.board.villagers, ((v) -> v.age > 0), cb, (villager) ->
           villager.age -= 1
 
-          if context.board.goldReserve >= 1
+          if context.board.goldReserves >= 1
             context.interact.menu {
               'Repeat this text': recurrent
               'Done': cb
@@ -457,29 +521,22 @@ DOCTOR = new ProfessionTemplate(
   )
 )
 
-APPRENTICE = new ProfessionTemplate(
-  'Apprentice',
+SCHOLAR = new ProfessionTemplate(
+  'Scholar',
   new Action(
-    'Choose one: remove 1 age from me, or replace my profession with a profession in the discard pile.'
+    'Choose one: replace my profession with a profession in the discard pile.'
     (context, cb) ->
-      context.interact.menu {
-        'Remove 1 age': ->
-          context.actingCard.age -= 1
-          do cb
+      context.interact.optionalSelect context.board.professionDeck.discard, null, cb, (replacement) ->
+        # Remove the replacement from the discard pile
+        context.board.professionDeck.discard.remove replacement
 
-        'Replace profession': ->
-          context.interact.optionalSelect context.board.professionDeck.discard, null, cb, (replacement) ->
-            # Remove the replacement from the discard pile
-            context.board.professionDeck.discard.remove replacement
+        # Discard the current profession
+        context.board.professionDeck.discardThese context.actingCard.profession
 
-            # Discard the current profession
-            context.board.professionDeck.discardThese context.actingCard.profession
+        # Replace the profession
+        context.actingCard.profession = replacement
 
-            # Replace the profession
-            context.actingCard.profession = replacement
-
-            do cb
-      }
+        do cb
   )
 )
 
@@ -489,7 +546,7 @@ GRAVEDIGGER = new ProfessionTemplate(
     'If a villager is age 10, gain 2 Gold.',
     (context, cb) ->
       if context.board.villagers.cards.some((villager) -> villager.age is 10)
-        context.board.goldReserve += 2
+        context.board.goldReserves += 2
       do cb
   )
 )
@@ -616,10 +673,19 @@ TRAINER = new ProfessionTemplate(
     (context, cb) ->
       context.interact.optionalSelect context.board.villagers, ((v) -> not v.acted), cb, (villager) ->
         recurrent = ->
-          context.interact.menu {
-            'Educate': -> educate_raw 1, context, recurrent, villager
-            'Done': cb
-          }
+          if context.board.foodReserves >= 1
+            context.interact.menu {
+              'Educate': ->
+                # Age the villager
+                context.board.foodReserves -= 1
+                villager.age += 1
+                villager.acted = true
+
+                educate_raw 1, context, recurrent, villager
+              'Done': cb
+            }
+          else
+            do cb
         do recurrent
   )
 )
@@ -635,6 +701,7 @@ TINKERER = new ProfessionTemplate(
             context.board.woodReserves += 1
             do cb
           'Build': ->
+            context.board.woodReserves -= 1
             build context, cb
           'Research(2)': ->
             context.board.woodReserves -= 2
@@ -691,11 +758,12 @@ HISTORIAN = new ProfessionTemplate(
 MATHEMATICIAN = new ProfessionTemplate(
   'Mathematician',
   new Action(
-    'If I am age 10 or older, do this twice: Research(10).'
+    'If I am age 9 or 10, Research(10).'
     (context, cb) ->
-      if context.actingCard.age >= 10
-        research 10, context, ->
-          research 10, context, cb
+      if context.actingCard.age in [9, 10]
+        research 10, context, cb
+      else
+        do cb
   )
 )
 
@@ -728,12 +796,78 @@ ARCHITECT = new ProfessionTemplate(
   )
 )
 
+SURVEYOR = new ProfessionTemplate(
+  'Surveyor',
+  new Action(
+    'Design(2).',
+    (context, cb) ->
+      design 2, context, cb
+  )
+)
+
+ENGINEER = new ProfessionTemplate(
+  'Engineer',
+  new Action(
+    'Design(2). You may pay 1 Wood to repeat this text.',
+    (context, cb) ->
+      recurrent = ->
+        design 2, context, ->
+          if context.board.woodReserves >= 2
+            context.interact.menu {
+              'Repeat': ->
+                context.board.woodReserves -= 2
+                do recurrent
+              'Done': cb
+            }
+          else
+            do cb
+      do recurrent
+  )
+)
+
+FOREMAN = new ProfessionTemplate(
+  'Foreman',
+  new Action(
+    'Design(2). Build(2).',
+    (context, cb) ->
+      design 2, context, ->
+        build context, ->
+          build context, cb
+  )
+)
+
 BUILDER = new ProfessionTemplate(
   'Builder',
   new Action(
     'Build twice.',
     (context, cb) ->
       build context, -> build context, cb
+  )
+)
+
+MASON = new ProfessionTemplate(
+  'Mason',
+  new Action(
+    'Gain 1 Wood. Build.',
+    (context, cb) ->
+      board.context.woodReserves += 1
+      build context, cb
+  )
+)
+
+WOODSMAN = new ProfessionTemplate(
+  'Woodsman',
+  new Action(
+    'Choose one: Gain 2 Wood, or Build twice.',
+    (context, cb) ->
+      context.interact.menu {
+        'Gain 2 Wood': ->
+          context.board.woodReserves += 2
+          do cb
+        'Build twice': ->
+          build context, ->
+            build context, cb
+      }
   )
 )
 
@@ -747,6 +881,7 @@ FARMER = new ProfessionTemplate(
       context.board.buildings.cards.forEach (building) ->
         if building.type.name is 'Farm' and building.progress >= building.type.bulk
           building.food += 1
+          building.food = Math.min building.food, 10
 
       do cb
   )
@@ -755,9 +890,13 @@ FARMER = new ProfessionTemplate(
 MINER = new ProfessionTemplate(
   'Miner',
   new Action(
-    'Gain 1 Gold.'
+    'Put 1 Gold on each of your Mines.'
     (context, cb) ->
-      context.board.goldReserves += 1
+      context.board.buildings.cards.forEach (building) ->
+        if building.type.name is 'Mine' and building.progress >= building.type.bulk
+          building.gold += 1
+          building.gold = Math.min building.food, 10
+
       do cb
   )
 )
@@ -830,7 +969,7 @@ VILLAGER_DECK = generate_deck [
   [FREELANCER, 7],
   [HOUSEWIFE, 5],
   [DOCTOR, 3],
-  [APPRENTICE, 3],
+  [SCHOLAR, 3],
   [GRAVEDIGGER, 3],
   [OVERSEER, 3],
   [TRAVELER, 7],
@@ -848,7 +987,11 @@ VILLAGER_DECK = generate_deck [
   [MATHEMATICIAN, 3],
   [CHEMIST, 3],
   [ARCHITECT, 5],
-  [BUILDER, 7],
+  [SURVEYOR, 5],
+  [ENGINEER, 5],
+  [FOREMAN, 5],
+  [WOODSMAN, 7],
+  [BUILDER, 10],
   [FARMER, 13],
   [MINER, 5],
   [TRADER, 3],
@@ -857,18 +1000,344 @@ VILLAGER_DECK = generate_deck [
   [FORESTER, 3]
 ]
 
-DUMMY_TECH = new TechnologyTemplate(
-  'Bad Idea',
-  (-> true),
-  [],
+DUMMY_TECH = {
+  create: ->
+    new Technology(
+      generateBadIdeaName(),
+      new Requirement(
+        'This is a bad idea. You cannot research this.',
+        (-> false)
+      )
+      {},
+      null
+    )
+}
+
+TWISTS = [
+  'Upside-Down',
+  'Inside-Out',
+  'Backwards',
+  'Invisible',
+  'Flying',
+  'Handheld',
+  'Self-Aware',
+  'Wearable',
+  'Edible',
+  'Rideable',
+  'Ant-Sized',
+  'Elephant-Sized',
+  'Uber, But For',
+  'Yelp, But For'
+]
+
+OBJECTS = [
+  'Wheelbarrows',
+  'Trees',
+  'Teacups',
+  'Guitars',
+  'Chopsticks',
+  'Baskets',
+  'Chairs',
+  'Water Bottles',
+  'Forks',
+  'Knives',
+  'Cows',
+  'Pigs'
+]
+
+generateBadIdeaName = ->
+  "#{TWISTS[Math.floor Math.random() * TWISTS.length]} #{OBJECTS[Math.floor Math.random() * OBJECTS.length]}"
+
+IRRIGATION = new TechnologyTemplate(
+  'Irrigation',
+  new Requirement(
+    '4 Farms',
+    ((context) ->
+      context.board.buildings.cards.filter((x) -> x.progress is x.type.bulk and x.type.name is 'Farm').length >= 4
+    )
+  ),
+  {
+    'End of turn': new Action(
+      'Put one Food on each of your farms.',
+      (context, cb) ->
+        context.board.buildings.cards.forEach (building) ->
+          if building.type.name is 'Farm' and building.progress >= building.type.bulk
+            building.food += 1
+            building.food = Math.min building.food, 10
+        do cb
+    )
+  },
+  null
+)
+
+CROP_ROTATION = new TechnologyTemplate(
+  'Crop Rotation',
+  new Requirement(
+    '2 Farms, one empty and one with Food.',
+    ((context) ->
+      context.board.buildings.cards.some((x) -> x.progress is x.type.bulk and x.type.name is 'Farm' and x.food is 0) and context.board.buildings.cards.some((x) -> x.progress is x.type.bulk and x.type.name is 'Farm' and x.food >= 1)
+    )
+  ),
+  {
+    'End of turn': new Action(
+      'Put 2 Food on each of your empty farms.',
+      (context, cb) ->
+        context.board.buildings.cards.forEach (building) ->
+          if building.type.name is 'Farm' and building.progress >= building.type.bulk and building.food is 0
+            building.food = 2
+        do cb
+    )
+  }
+)
+
+FORAGING = new TechnologyTemplate(
+  'Foraging',
+  new Requirement(
+    '5 Wood and all your Farms are empty',
+    ((context) ->
+      context.board.woodReserves >= 5 and context.board.buildings.cards.every((building) -> building.type.name isnt 'Farm' or building.food is 0)
+    )
+  ),
+  {},
   new Action(
-    'Do nothing.',
-    (context, cb) -> do cb
+    'Take one Food.',
+    (context, cb) ->
+      context.board.foodReserves += 1
+      do cb
   )
 )
 
+TOOLS = new TechnologyTemplate(
+  'Tools',
+  new Requirement(
+    '5 Wood, 3 unfinished buildings',
+    ((context) ->
+      context.board.woodReserves >= 5 and context.board.buildings.cards.filter((x) -> x.bulk < x.progress).length >= 3
+    )
+  ),
+  {},
+  new Action(
+    'Build.'
+    (context, cb) ->
+      build context, cb
+  )
+)
+
+GEOLOGY = new TechnologyTemplate(
+  'Geology',
+  new Requirement(
+    'Three Mines, each with Gold on them',
+    ((context) ->
+      context.board.buildings.cards.filter((x) -> x.type.name is 'Mine' and x.bulk is x.progress and x.gold >= 1).length >= 3
+    )
+  ),
+  {},
+  new Action(
+    'Put 3 Gold on a Mine.',
+    ((context, cb) ->
+      context.interact.optionalSelect board.buildings, ((b) -> b.type.name is 'Mine' and b.progress is b.type.bulk), cb, (mine) ->
+        mine.gold += 3
+        do cb
+    )
+  )
+)
+
+MINING_EXPLOSIVES = new TechnologyTemplate(
+  'Mining Explosives',
+  new Requirement(
+    'Three mines, all empty.',
+    ((context) ->
+      context.board.buildings.cards.filter((x) -> x.type.name is 'Mine' and x.bulk is x.progress and x.gold is 1).length >= 3
+    )
+  ),
+  {},
+  new Action(
+    'Remove all progress from a finished Mine. Take 7 Gold.',
+    ((context, cb) ->
+      context.interact.optionalSelect board.buildings, ((b) -> b.type.name is 'Mine' and b.progress is b.type.bulk), cb, (mine) ->
+        mine.progress = 0
+        context.board.gold += 7
+
+        do cb
+    )
+  )
+)
+
+NURSING = new TechnologyTemplate(
+  'Nursing',
+  new Requirement(
+    '3 villagers, each of age 0, 1, or 2.',
+    ((context) ->
+      context.board.villagers.cards.filter((x) -> x.age in [0, 1, 2]).length >= 3
+    )
+  ),
+  {
+    'End of turn': new Action(
+      'Educate(2) each newborn villager.',
+      ((context, cb) ->
+        children = context.board.villagers.cards.filter (v) -> v.age is 0
+
+        recurrent = (rcb, i = 0) ->
+          if i is children.length
+            do rcb
+          else
+            educate_raw 2, context, (->
+              recurrent rcb, i + 1
+            ), children[i]
+
+        recurrent cb
+      )
+    )
+  },
+  null
+)
+
+PATENTS = new TechnologyTemplate(
+  'Patents',
+  new Requirement(
+    '10 Technologies',
+    ((context) ->
+      context.board.technologies.cards.length >= 10
+    )
+  ),
+  {},
+  new Action(
+    'Research(1)',
+    ((context, cb) -> research 1, context, cb)
+  )
+)
+
+UTOPIA = new TechnologyTemplate(
+  'Utopia',
+  new Requirement(
+    '10 Villagers. 15 Buildings. A total of 40 bulk among your buildings. 40 Food, 20 Wood, and 10 Gold.',
+    ((context) ->
+      context.board.villagers.cards.length >= 10 and
+      context.board.buildings.cards.length >= 10 and
+      context.board.buildings.cards.map((x) -> x.bulk).reduce((a, b) -> a + b) >= 40 and
+      context.board.foodReserves >= 40 and
+      context.board.woodReserves >= 20 and
+      context.board.goldReserves >= 10
+    )
+  ),
+  {
+    'End of turn': new Action(
+      'Win the game.',
+      ((context, cb) ->
+        console.log 'You win!'
+        process.exit 0
+      )
+    )
+  },
+  null
+)
+
+WORK_ANIMALS = new TechnologyTemplate(
+  'Work Animals',
+  new Requirement(
+    '10 Food per building you have',
+    ((context) ->
+      context.board.foodReserves >= context.board.buildings.cards.filter((x) -> x.progress is x.type.bulk).length * 10
+    )
+  ),
+  {
+    'End of turn': new Action(
+      'For each of your buildings, you may pay 1 Food to take its action.',
+      ((context, cb) ->
+        buildings = board.buildings.cards.filter((x) -> x.progress >= x.type.bulk and not x.acted)
+        recurrent = (i = 0) ->
+          if context.board.foodReserves >= 1 and i < buildings.length
+            building = buildings[i]
+            console.log building.render()
+            context.interact.menu {
+              'Take action': ->
+                context.board.foodReserves -= 1
+                building.acted = true
+                context = new ActionContext board, building, context.actingCard
+                building.type.action.apply context, -> recurrent i + 1
+              'Pass': ->
+                recurrent i + 1
+            }
+          else
+            do cb
+        do recurrent
+      )
+    )
+  }
+)
+
+CRANE = new TechnologyTemplate(
+  'Crane',
+  new Requirement(
+    '7 Wood, 3 unfinished buildings, and 10 total progress on buildings.',
+    ((context) ->
+      context.board.woodReserves >= 7 and
+      context.board.buildings.cards.filter((x) -> x.progress < x.type.bulk).length >= 3 and
+      context.board.buildings.cards.map((x) -> x.progress).reduce((a, b) -> a + b) >= 10
+    )
+  ),
+  {
+    'Whenever you Build': new Action(
+      'Build (this card does not activate itself)',
+      (context, cb) ->
+        unless context.textCard._disableActivation
+          context.textCard._disableActivation = true
+          build context, ->
+            context.textCard._disableActivation = false
+            do cb
+        else
+          do cb
+    )
+  },
+  null
+)
+
+SCAFFOLDING = new TechnologyTemplate(
+  'Scaffolding',
+  new Requirement(
+    '3 unfinished buildings, each at least 5 in bulk.',
+    (context) ->
+      context.buildings.cards.filter((x) -> x.progress < x.type.bulk and x.type.bulk >= 5).length >= 3
+  ),
+  {
+    'Whenever you Build': new Action(
+      'Put 1 Wood here',
+      (context, cb) ->
+        context.textCard.wood += 1
+        do cb
+    )
+  },
+  new Action(
+    'Build all the wood here.',
+    (context, cb) ->
+      recurrent = ->
+        if context.textCard.wood >= 1
+          context.textCard.wood -= 1
+          context.board.woodReserves += 1
+          build context, recurrent
+        else
+          do cb
+
+      do recurrent
+  )
+)
+
+TECHNOLOGY_SAMPLER = []
+
 TECHNOLOGY_DECK = generate_deck [
-  [DUMMY_TECH, 50]
+  [DUMMY_TECH, 110]
+  [FORAGING, 10]
+  [TOOLS, 10]
+  [CRANE, 10]
+  [SCAFFOLDING, 10]
+  [GEOLOGY, 10]
+  [MINING_EXPLOSIVES, 10]
+  [CROP_ROTATION, 10]
+  [IRRIGATION, 10]
+  [NURSING, 10]
+  [PATENTS, 10]
+  [WORK_ANIMALS, 10]
+  [UTOPIA, 1]
 ]
 
 
@@ -884,6 +1353,12 @@ singleVillager = (board, villager, cb) ->
         context = new ActionContext board, building, villager
         building.type.action.apply context, cb
   }
+
+  if board.technologies.cards.filter((tech) -> tech.action?).length >= 1
+    menu['Execute a technology action'] = ->
+      board.interact.optionalSelect board.technologies, ((tech) -> tech.action?), cb, (tech) ->
+        context = new ActionContext board, tech, villager
+        tech.action.apply context, cb
 
   if board.foodReserves >= 4
     menu['Give birth'] = ->
@@ -904,6 +1379,11 @@ villagerRecurrent = (board, cb) ->
       board.foodReserves -= 1
 
       singleVillager board, villager, ->
+        # Cap resources
+        board.foodReserves = Math.min board.foodReserves, 20 + board.buildings.cards.filter((x) -> x.progress >= x.type.bulk).map((x) -> x.type.storage.food).reduce((a, b) -> a + b)
+        board.woodReserves = Math.min board.woodReserves, 10 + board.buildings.cards.filter((x) -> x.progress >= x.type.bulk).map((x) -> x.type.storage.wood).reduce((a, b) -> a + b)
+        board.goldReserves = Math.min board.goldReserves, 5 + board.buildings.cards.filter((x) -> x.progress >= x.type.bulk).map((x) -> x.type.storage.gold).reduce((a, b) -> a + b)
+
         villagerRecurrent board, cb
   else
     do cb
@@ -912,21 +1392,31 @@ executeTurn = (board, cb) ->
   if board.villagers.cards.length > 0
     if board.foodReserves > 0
       villagerRecurrent board, ->
-        # Clean-up.
+        # Process end-of-turn hooks
+        recurrent = (rcb, i = 0) ->
+          if i is board.technologies.cards.length
+            do rcb
+          else
+            card = board.technologies.cards[i]
+            if card.hooks['End of turn']?
+              console.log 'TECHNOLOGY ACTIVATES:', card.name
+              card.hooks['End of turn'].apply new ActionContext(board, card, card), -> recurrent rcb, i + 1
+            else
+              recurrent rcb, i + 1
 
-        # 1 Kill all cards that weren't fed.
-        board.villagers.cards = board.villagers.cards.filter (x) -> x.acted
+        recurrent ->
+          # Clean-up.
+          removals = board.villagers.cards.filter (x) -> (not x.acted) or x.age >= 10
+          board.professionDeck.discardThese removals.map (x) -> x.profession
+          board.villagers.cards = board.villagers.cards.filter (x) -> x.acted and x.age < 10
 
-        # 2 Kill all villagers who are too old
-        board.villagers.cards = board.villagers.cards.filter (x) -> x.age < 10
+          # 2 De-act all villagers
+          board.villagers.cards.forEach (villager) -> villager.acted = false
 
-        # 2 De-act all villagers
-        board.villagers.cards.forEach (villager) -> villager.acted = false
+          # 2 De-act all buildings
+          board.buildings.cards.forEach (building) -> building.acted = false
 
-        # 2 De-act all buildings
-        board.buildings.cards.forEach (building) -> building.acted = false
-
-        do cb
+          do cb
 
     else
       console.log 'You ran out of food. You lose.'
